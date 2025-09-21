@@ -1,8 +1,6 @@
-[submodule "binutils"]
-	path = binutils
-	url = https://sourceware.org/git/binutils-gdb.git
-	branch = binutils-2_46-branch
-	shallow = true
+# Some of the external git repos are not upstream servers but upstream clones to
+# avoid "Server does not allow request for unadvertised object" errors (see
+# #1654).
 [submodule "gcc"]
 	path = gcc
 	url = https://github.com/gcc-mirror/gcc.git
@@ -21,11 +19,6 @@
 	path = newlib
 	url = https://sourceware.org/git/newlib-cygwin.git
 	branch = master
-	shallow = true
-[submodule "gdb"]
-	path = gdb
-	url = https://sourceware.org/git/binutils-gdb.git
-	branch = gdb-16-branch
 	shallow = true
 [submodule "qemu"]
 	path = qemu
