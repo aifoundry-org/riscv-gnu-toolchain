@@ -8,7 +8,7 @@
 	shallow = true
 [submodule "glibc"]
 	path = glibc
-	url = https://github.com/bminor/glibc.git
+	url = https://sourceware.org/git/glibc.git
 	shallow = true
 [submodule "dejagnu"]
 	path = dejagnu
@@ -17,7 +17,7 @@
 	shallow = true
 [submodule "newlib"]
 	path = newlib
-	url = https://github.com/bminor/newlib.git
+	url = https://sourceware.org/git/newlib-cygwin.git
 	branch = master
 	shallow = true
 [submodule "qemu"]
