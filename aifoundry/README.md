@@ -2,10 +2,10 @@
 
 This repository contains the toolchain for the ETSOC1 chip.
 
-To build:
+To build (note the last --enable-strip):
 
     $ ./configure --prefix=/opt/et --with-arch=rv64imfc --with-abi=lp64f \
-                  --with-languages=c,c++ --with-cmodel=medany
+                  --with-languages=c,c++ --with-cmodel=medany --enable-strip
     $ make -j $(nproc)
 
 As per main README, Ubuntu dependencies are as following:
