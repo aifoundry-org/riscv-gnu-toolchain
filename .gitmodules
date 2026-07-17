@@ -4,7 +4,7 @@
 [submodule "gcc"]
 	path = gcc
 	url = https://github.com/gcc-mirror/gcc.git
-	branch = releases/gcc-15
+	branch = releases/gcc-16
 	shallow = true
 [submodule "glibc"]
 	path = glibc
@@ -14,7 +14,7 @@
 	path = dejagnu
 	url = https://git.savannah.gnu.org/git/dejagnu.git
 	branch = master
-	shallow = true
+	shallow = false
 [submodule "newlib"]
 	path = newlib
 	url = https://sourceware.org/git/newlib-cygwin.git

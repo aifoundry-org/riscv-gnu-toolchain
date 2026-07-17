@@ -14,6 +14,78 @@ QEMU_SRCDIR := @with_qemu_src@
 SPIKE_SRCDIR := @with_spike_src@
 PK_SRCDIR := @with_pk_src@
 LLVM_SRCDIR := @with_llvm_src@
+LLVM_LINUX_COMMON_CMAKE_FLAGS = \
+    -DCMAKE_INSTALL_PREFIX=$(INSTALL_DIR) \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_TARGETS_TO_BUILD="RISCV" \
+    -DLLVM_ENABLE_PROJECTS="llvm;clang;lld" \
+    -DLLVM_ENABLE_RUNTIMES="compiler-rt;libcxx;libcxxabi;libunwind" \
+    -DDEFAULT_SYSROOT="../sysroot" \
+    -DLLVM_INSTALL_TOOLCHAIN_ONLY=On \
+    -DLLVM_BINUTILS_INCDIR=$(BINUTILS_SRCDIR)/include \
+    -DLLVM_PARALLEL_LINK_JOBS=4
+define LLVM_BUILD_OPENMP
+	if test $(XLEN) -eq 64; then \
+	    mkdir $(notdir $@)/openmp-shared; \
+	    cmake -S$(LLVM_SRCDIR)/openmp \
+	        -B$(notdir $@)/openmp-shared \
+	        -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
+	        -DCMAKE_C_COMPILER=$(LLVM_CC_FOR_TARGET) \
+	        -DCMAKE_CXX_COMPILER=$(LLVM_CXX_FOR_TARGET) \
+	        -DCMAKE_C_FLAGS="$(LLVM_CFLAGS_FOR_TARGET)" \
+	        -DCMAKE_CXX_FLAGS="$(LLVM_CXXFLAGS_FOR_TARGET)" \
+	        -DOPENMP_ENABLE_LIBOMPTARGET=Off \
+	        -DCMAKE_BUILD_TYPE=Release \
+	        -DLIBOMP_ARCH=riscv64 \
+	        -DLIBOMP_HAVE_WARN_SHARED_TEXTREL_FLAG=On \
+	        -DLIBOMP_HAVE_AS_NEEDED_FLAG=On \
+	        -DLIBOMP_HAVE_VERSION_SCRIPT_FLAG=On \
+	        -DLIBOMP_HAVE_STATIC_LIBGCC_FLAG=On \
+	        -DLIBOMP_HAVE_Z_NOEXECSTACK_FLAG=On \
+	        -DDISABLE_OMPD_GDB_PLUGIN=On \
+	        -DLIBOMP_OMPD_GDB_SUPPORT=Off \
+	        -DLIBOMP_ENABLE_SHARED=On; \
+	    $(MAKE) -C $(notdir $@)/openmp-shared; \
+	    $(MAKE) -C $(notdir $@)/openmp-shared install; \
+	    mkdir $(notdir $@)/openmp-static; \
+	    cmake -S$(LLVM_SRCDIR)/openmp \
+	        -B$(notdir $@)/openmp-static \
+	        -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
+	        -DCMAKE_C_COMPILER=$(LLVM_CC_FOR_TARGET) \
+	        -DCMAKE_CXX_COMPILER=$(LLVM_CXX_FOR_TARGET) \
+	        -DCMAKE_C_FLAGS="$(LLVM_CFLAGS_FOR_TARGET)" \
+	        -DCMAKE_CXX_FLAGS="$(LLVM_CXXFLAGS_FOR_TARGET)" \
+	        -DOPENMP_ENABLE_LIBOMPTARGET=Off \
+	        -DCMAKE_BUILD_TYPE=Release \
+	        -DLIBOMP_ARCH=riscv64 \
+	        -DLIBOMP_HAVE_WARN_SHARED_TEXTREL_FLAG=On \
+	        -DLIBOMP_HAVE_AS_NEEDED_FLAG=On \
+	        -DLIBOMP_HAVE_VERSION_SCRIPT_FLAG=On \
+	        -DLIBOMP_HAVE_STATIC_LIBGCC_FLAG=On \
+	        -DLIBOMP_HAVE_Z_NOEXECSTACK_FLAG=On \
+	        -DDISABLE_OMPD_GDB_PLUGIN=On \
+	        -DLIBOMP_OMPD_GDB_SUPPORT=Off \
+	        -DLIBOMP_ENABLE_SHARED=Off; \
+	    $(MAKE) -C $(notdir $@)/openmp-static; \
+	    $(MAKE) -C $(notdir $@)/openmp-static install; \
+	fi
+endef
+define LLVM_LINUX_SYSROOT_SETUP
+	# We have the following situation:
+	# - sysroot directory: $(INSTALL_DIR)/sysroot
+	# - GCC install directory: $(INSTALL_DIR)
+	# However, LLVM does not allow to set a GCC install prefix
+	# (-DGCC_INSTALL_PREFIX) if a sysroot (-DDEFAULT_SYSROOT) is set
+	# (the GCC install prefix will be ignored silently).
+	# Without a proper sysroot path feature.h won't be found by clang.
+	# Without a proper GCC install directory libgcc won't be found.
+	# As a workaround we have to merge both paths:
+	mkdir -p $(SYSROOT)/lib/
+	ln -s -f ../../lib/gcc $(SYSROOT)/lib/gcc
+	rm -rf $@ $(notdir $@)
+	mkdir $(notdir $@)
+	cd $(notdir $@) && ln -f -s $(SYSROOT) sysroot
+endef
 DEJAGNU_SRCDIR := @with_dejagnu_src@
 DEBUG_INFO := @debug_info@
 ENABLE_DEFAULT_PIE := @enable_default_pie@
@@ -76,6 +148,7 @@ GCC_MULTILIB_FLAGS := $(MULTILIB_FLAGS) --with-multilib-generator="$(MULTILIB_GE
 endif
 GLIBC_MULTILIB_NAMES := @glibc_multilib_names@
 GCC_CHECKING_FLAGS := @gcc_checking@
+GCC_WITH_SPECS := @gcc_with_specs@
 
 EXTRA_MULTILIB_TEST := @extra_multilib_test@
 
@@ -84,15 +157,39 @@ ifneq ($(XLEN),32)
 	XLEN := 64
 endif
 
-make_tuple = riscv$(1)-unknown-$(2)
+ifeq (@endian@,big)
+ENDIAN_POSTFIX := be
+endif
+
+make_tuple = riscv$(1)$(ENDIAN_POSTFIX)-unknown-$(2)
 LINUX_TUPLE  ?= $(call make_tuple,$(XLEN),linux-gnu)
 NEWLIB_TUPLE ?= $(call make_tuple,$(XLEN),elf)
 MUSL_TUPLE ?= $(call make_tuple,$(XLEN),linux-musl)
 UCLIBC_TUPLE ?= $(call make_tuple,$(XLEN),linux-uclibc)
 
+# When MULTILIB_GEN specifies code model variants (--cmodel), omit the global
+# cmodel flag so GCC's multilib mechanism can set the correct -mcmodel per
+# variant. Without this, -mcmodel=medlow in CFLAGS_FOR_TARGET overrides the
+# per-variant flag GCC passes internally, causing crtbegin.o to always be compiled
+# with medlow even in medany/large multilib directories.
+ifneq (,$(findstring --cmodel,$(MULTILIB_GEN)))
+CFLAGS_FOR_TARGET := $(CFLAGS_FOR_TARGET_EXTRA) $(DEBUG_INFO) @target_cflags@
+CXXFLAGS_FOR_TARGET := $(CXXFLAGS_FOR_TARGET_EXTRA) $(DEBUG_INFO) @target_cxxflags@
+ASFLAGS_FOR_TARGET := $(ASFLAGS_FOR_TARGET_EXTRA) $(DEBUG_INFO)
+else
 CFLAGS_FOR_TARGET := $(CFLAGS_FOR_TARGET_EXTRA) $(DEBUG_INFO) @target_cflags@ @cmodel@
 CXXFLAGS_FOR_TARGET := $(CXXFLAGS_FOR_TARGET_EXTRA) $(DEBUG_INFO) @target_cxxflags@ @cmodel@
 ASFLAGS_FOR_TARGET := $(ASFLAGS_FOR_TARGET_EXTRA) $(DEBUG_INFO) @cmodel@
+endif
+LLVM_TARGET_ARCH := $(patsubst --with-arch=%,%,$(WITH_ARCH))
+LLVM_TARGET_ABI := $(patsubst --with-abi=%,%,$(WITH_ABI))
+LLVM_TARGET_TUNE := $(patsubst --with-tune=%,%,$(WITH_TUNE))
+# Clang does not support --with-isa-spec directly, so only forward arch/abi/tune.
+LLVM_TARGET_FLAGS := $(if $(LLVM_TARGET_ARCH),-march=$(LLVM_TARGET_ARCH)) \
+	$(if $(LLVM_TARGET_ABI),-mabi=$(LLVM_TARGET_ABI)) \
+	$(if $(LLVM_TARGET_TUNE),-mtune=$(LLVM_TARGET_TUNE))
+LLVM_CFLAGS_FOR_TARGET := $(strip $(LLVM_TARGET_FLAGS) $(CFLAGS_FOR_TARGET))
+LLVM_CXXFLAGS_FOR_TARGET := $(strip $(LLVM_TARGET_FLAGS) $(CXXFLAGS_FOR_TARGET))
 # --with-expat is required to enable XML support used by OpenOCD.
 BINUTILS_TARGET_FLAGS := --with-expat=yes $(BINUTILS_TARGET_FLAGS_EXTRA)
 BINUTILS_NATIVE_FLAGS := $(BINUTILS_NATIVE_FLAGS_EXTRA)
@@ -128,6 +225,9 @@ MUSL_TARGET_FLAGS := $(MUSL_TARGET_FLAGS_EXTRA)
 MUSL_CC_FOR_TARGET ?= $(MUSL_TUPLE)-gcc
 MUSL_CXX_FOR_TARGET ?= $(MUSL_TUPLE)-g++
 
+LLVM_CC_FOR_TARGET ?= $(INSTALL_DIR)/bin/clang
+LLVM_CXX_FOR_TARGET ?= $(INSTALL_DIR)/bin/clang++
+
 UCLIBC_TARGET_FLAGS := $(UCLIBC_TARGET_FLAGS_EXTRA)
 UCLIBC_CC_FOR_TARGET ?= $(UCLIBC_TUPLE)-gcc
 UCLIBC_CXX_FOR_TARGET ?= $(UCLIBC_TUPLE)-g++
@@ -155,6 +255,7 @@ ifeq (@enable_llvm@,--enable-llvm)
 all: stamps/build-llvm-@default_target@
 newlib: stamps/build-llvm-newlib
 linux: stamps/build-llvm-linux
+musl: stamps/build-llvm-musl
 ifeq (@multilib_flags@,--enable-multilib)
 $(error "Setting multilib flags for LLVM builds is not supported.")
 endif
@@ -532,6 +633,7 @@ stamps/build-gcc-linux-stage2: $(GCC_SRCDIR) $(GCC_SRC_GIT) $(addprefix stamps/b
 		$(WITH_ARCH) \
 		$(WITH_TUNE) \
 		$(WITH_ISA_SPEC) \
+		$(GCC_WITH_SPECS) \
 		$(GCC_EXTRA_CONFIGURE_FLAGS) \
 		CFLAGS_FOR_TARGET="-O2 $(CFLAGS_FOR_TARGET)" \
 		CXXFLAGS_FOR_TARGET="-O2 $(CXXFLAGS_FOR_TARGET)"
@@ -783,6 +885,7 @@ stamps/build-gcc-newlib-stage2: $(GCC_SRCDIR) $(GCC_SRC_GIT) stamps/build-newlib
 		$(WITH_ARCH) \
 		$(WITH_TUNE) \
 		$(WITH_ISA_SPEC) \
+		$(GCC_WITH_SPECS) \
 		$(GCC_EXTRA_CONFIGURE_FLAGS) \
 		CFLAGS_FOR_TARGET="-Os $(CFLAGS_FOR_TARGET)" \
 		CXXFLAGS_FOR_TARGET="-Os $(CXXFLAGS_FOR_TARGET)"
@@ -945,6 +1048,7 @@ stamps/build-gcc-musl-stage2: $(GCC_SRCDIR) $(GCC_SRC_GIT) stamps/build-musl-lin
 		$(WITH_ARCH) \
 		$(WITH_TUNE) \
 		$(WITH_ISA_SPEC) \
+		$(GCC_WITH_SPECS) \
 		$(GCC_EXTRA_CONFIGURE_FLAGS) \
 		CFLAGS_FOR_TARGET="-O2 $(CFLAGS_FOR_TARGET)" \
 		CXXFLAGS_FOR_TARGET="-O2 $(CXXFLAGS_FOR_TARGET)"
@@ -1080,6 +1184,7 @@ stamps/build-gcc-uclibc-stage2: $(GCC_SRCDIR) $(GCC_SRC_GIT) stamps/build-uclibc
 		$(WITH_ARCH) \
 		$(WITH_TUNE) \
 		$(WITH_ISA_SPEC) \
+		$(GCC_WITH_SPECS) \
 		$(GCC_EXTRA_CONFIGURE_FLAGS) \
 		CFLAGS_FOR_TARGET="-O2 $(CFLAGS_FOR_TARGET)" \
 		CXXFLAGS_FOR_TARGET="-O2 $(CXXFLAGS_FOR_TARGET)"
@@ -1141,80 +1246,42 @@ stamps/build-qemu: $(QEMU_SRCDIR) $(QEMU_SRC_GIT) $(PREPARATION_STAMP)
 
 stamps/build-llvm-linux: $(LLVM_SRCDIR) $(LLVM_SRC_GIT) $(BINUTILS_SRCDIR) $(BINUTILS_SRC_GIT) \
                          stamps/build-gcc-linux-stage2
-	# We have the following situation:
-	# - sysroot directory: $(INSTALL_DIR)/sysroot
-	# - GCC install directory: $(INSTALL_DIR)
-	# However, LLVM does not allow to set a GCC install prefix
-	# (-DGCC_INSTALL_PREFIX) if a sysroot (-DDEFAULT_SYSROOT) is set
-	# (the GCC install prefix will be ignored silently).
-	# Without a proper sysroot path feature.h won't be found by clang.
-	# Without a proper GCC install directory libgcc won't be found.
-	# As a workaround we have to merge both paths:
-	mkdir -p $(SYSROOT)/lib/
-	ln -s -f $(INSTALL_DIR)/lib/gcc $(SYSROOT)/lib/gcc
-	rm -rf $@ $(notdir $@)
-	mkdir $(notdir $@)
-	cd $(notdir $@) && ln -f -s $(SYSROOT) sysroot
+	$(LLVM_LINUX_SYSROOT_SETUP)
 	cd $(notdir $@) && \
 	    cmake $(LLVM_SRCDIR)/llvm \
-	    -DCMAKE_INSTALL_PREFIX=$(INSTALL_DIR) \
-	    -DCMAKE_BUILD_TYPE=Release \
-	    -DLLVM_TARGETS_TO_BUILD="RISCV" \
-	    -DLLVM_ENABLE_PROJECTS="llvm;clang;lld" \
-	    -DLLVM_ENABLE_RUNTIMES="compiler-rt;libcxx;libcxxabi;libunwind" \
-	    -DLLVM_DEFAULT_TARGET_TRIPLE="$(LINUX_TUPLE)" \
-	    -DDEFAULT_SYSROOT="../sysroot" \
-	    -DLLVM_RUNTIME_TARGETS=$(call make_tuple,$(XLEN),linux-gnu) \
-	    -DLLVM_INSTALL_TOOLCHAIN_ONLY=On \
-	    -DLLVM_BINUTILS_INCDIR=$(BINUTILS_SRCDIR)/include \
-	    -DLLVM_PARALLEL_LINK_JOBS=4 \
+	    $(LLVM_LINUX_COMMON_CMAKE_FLAGS) \
+	    -DLLVM_DEFAULT_TARGET_TRIPLE=$(LINUX_TUPLE) \
+	    -DLLVM_RUNTIME_TARGETS=$(LINUX_TUPLE) \
+	    "-DRUNTIMES_$(LINUX_TUPLE)_CMAKE_C_FLAGS=$(LLVM_CFLAGS_FOR_TARGET)" \
+	    "-DRUNTIMES_$(LINUX_TUPLE)_CMAKE_CXX_FLAGS=$(LLVM_CXXFLAGS_FOR_TARGET)" \
 	    $(LLVM_EXTRA_CONFIGURE_FLAGS)
 	$(MAKE) -C $(notdir $@)
 	$(MAKE) -C $(notdir $@) $(subst -,/,$(INSTALL_TARGET))
-	# Build shared/static OpenMP libraries on RV64.
-	if test $(XLEN) -eq 64; then \
-	    mkdir $(notdir $@)/openmp-shared; \
-	    cmake -S$(LLVM_SRCDIR)/openmp \
-	        -B$(notdir $@)/openmp-shared \
-	        -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
-	        -DCMAKE_C_COMPILER=$(INSTALL_DIR)/bin/clang \
-	        -DCMAKE_CXX_COMPILER=$(INSTALL_DIR)/bin/clang++ \
-	        -DOPENMP_ENABLE_LIBOMPTARGET=Off \
-	        -DCMAKE_BUILD_TYPE=Release \
-	        -DLIBOMP_ARCH=riscv64 \
-	        -DLIBOMP_HAVE_WARN_SHARED_TEXTREL_FLAG=On \
-	        -DLIBOMP_HAVE_AS_NEEDED_FLAG=On \
-	        -DLIBOMP_HAVE_VERSION_SCRIPT_FLAG=On \
-	        -DLIBOMP_HAVE_STATIC_LIBGCC_FLAG=On \
-	        -DLIBOMP_HAVE_Z_NOEXECSTACK_FLAG=On \
-	        -DDISABLE_OMPD_GDB_PLUGIN=On \
-	        -DLIBOMP_OMPD_GDB_SUPPORT=Off \
-	        -DLIBOMP_ENABLE_SHARED=On; \
-	    $(MAKE) -C $(notdir $@)/openmp-shared; \
-	    $(MAKE) -C $(notdir $@)/openmp-shared install; \
-	    mkdir $(notdir $@)/openmp-static; \
-	    cmake -S$(LLVM_SRCDIR)/openmp \
-	        -B$(notdir $@)/openmp-static \
-	        -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
-	        -DCMAKE_C_COMPILER=$(INSTALL_DIR)/bin/clang \
-	        -DCMAKE_CXX_COMPILER=$(INSTALL_DIR)/bin/clang++ \
-	        -DOPENMP_ENABLE_LIBOMPTARGET=Off \
-	        -DCMAKE_BUILD_TYPE=Release \
-	        -DLIBOMP_ARCH=riscv64 \
-	        -DLIBOMP_HAVE_WARN_SHARED_TEXTREL_FLAG=On \
-	        -DLIBOMP_HAVE_AS_NEEDED_FLAG=On \
-	        -DLIBOMP_HAVE_VERSION_SCRIPT_FLAG=On \
-	        -DLIBOMP_HAVE_STATIC_LIBGCC_FLAG=On \
-	        -DLIBOMP_HAVE_Z_NOEXECSTACK_FLAG=On \
-	        -DDISABLE_OMPD_GDB_PLUGIN=On \
-	        -DLIBOMP_OMPD_GDB_SUPPORT=Off \
-	        -DLIBOMP_ENABLE_SHARED=Off; \
-	    $(MAKE) -C $(notdir $@)/openmp-static; \
-	    $(MAKE) -C $(notdir $@)/openmp-static install; \
-	fi
-	cp $(notdir $@)/lib/riscv$(XLEN)-unknown-linux-gnu/libc++* $(SYSROOT)/lib
-	cp $(notdir $@)/lib/riscv$(XLEN)-unknown-linux-gnu/libunwind* $(SYSROOT)/lib
+	$(LLVM_BUILD_OPENMP)
+	cp $(notdir $@)/lib/$(LINUX_TUPLE)/libc++* $(SYSROOT)/lib
+	cp $(notdir $@)/lib/$(LINUX_TUPLE)/libunwind* $(SYSROOT)/lib
 	cd $(INSTALL_DIR)/bin && ln -s -f clang $(LINUX_TUPLE)-clang && ln -s -f clang++ $(LINUX_TUPLE)-clang++
+	mkdir -p $(dir $@) && touch $@
+
+stamps/build-llvm-musl: $(LLVM_SRCDIR) $(LLVM_SRC_GIT) $(BINUTILS_SRCDIR) $(BINUTILS_SRC_GIT) \
+                         stamps/build-gcc-musl-stage2
+	$(LLVM_LINUX_SYSROOT_SETUP)
+	cd $(notdir $@) && \
+	    cmake $(LLVM_SRCDIR)/llvm \
+	    $(LLVM_LINUX_COMMON_CMAKE_FLAGS) \
+	    -DLLVM_DEFAULT_TARGET_TRIPLE=$(MUSL_TUPLE) \
+	    -DLLVM_RUNTIME_TARGETS=$(MUSL_TUPLE) \
+	    -DRUNTIMES_$(MUSL_TUPLE)_LIBCXX_HAS_MUSL_LIBC=On \
+	    -DRUNTIMES_$(MUSL_TUPLE)_COMPILER_RT_BUILD_SANITIZERS=Off \
+	    "-DRUNTIMES_$(MUSL_TUPLE)_CMAKE_C_FLAGS=$(LLVM_CFLAGS_FOR_TARGET)" \
+	    "-DRUNTIMES_$(MUSL_TUPLE)_CMAKE_CXX_FLAGS=$(LLVM_CXXFLAGS_FOR_TARGET)" \
+	    $(LLVM_EXTRA_CONFIGURE_FLAGS)
+	$(MAKE) -C $(notdir $@)
+	$(MAKE) -C $(notdir $@) $(subst -,/,$(INSTALL_TARGET))
+	$(LLVM_BUILD_OPENMP)
+	cp $(notdir $@)/lib/$(MUSL_TUPLE)/libc++* $(SYSROOT)/lib
+	cp $(notdir $@)/lib/$(MUSL_TUPLE)/libunwind* $(SYSROOT)/lib
+	cd $(INSTALL_DIR)/bin && ln -s -f clang $(MUSL_TUPLE)-clang && ln -s -f clang++ $(MUSL_TUPLE)-clang++
 	mkdir -p $(dir $@) && touch $@
 
 stamps/build-llvm-newlib: $(LLVM_SRCDIR) $(LLVM_SRC_GIT) $(BINUTILS_SRCDIR) $(BINUTILS_SRC_GIT) \
